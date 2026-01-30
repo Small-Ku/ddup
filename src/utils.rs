@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use super::{UsnRecord, UsnRecordType};
 
-pub fn usn_records_to_hash_map(iterator: impl Iterator<Item=UsnRecord>)
-                               -> HashMap<u64, UsnRecord> {
+pub fn usn_records_to_hash_map(
+    iterator: impl Iterator<Item = UsnRecord>,
+) -> HashMap<u64, UsnRecord> {
     iterator.map(|record| (record.id, record)).collect()
 }
 
@@ -16,7 +17,7 @@ pub fn hash_map_to_paths(map: &HashMap<u64, UsnRecord>) -> Vec<PathBuf> {
             continue;
         }
 
-        let mut path= PathBuf::from(&record.filename);
+        let mut path = PathBuf::from(&record.filename);
 
         // Traverse hashmap to find parents
         let mut current = record;

@@ -1,6 +1,6 @@
 use ddup::Ntfs;
-use ddup::Volume;
 use ddup::UsnRange;
+use ddup::Volume;
 
 #[test]
 fn enumerate_mft_records() -> Result<(), std::io::Error> {
@@ -14,11 +14,10 @@ fn enumerate_mft_records() -> Result<(), std::io::Error> {
     };
 
     for record in volume.usn_records(&range).take(1000) {
-        println!("{:x} {:x} {:?} `{}`",
-                 record.id,
-                 record.parent_id,
-                 record.record_type,
-                 record.filename);
+        println!(
+            "{:x} {:x} {:?} `{}`",
+            record.id, record.parent_id, record.record_type, record.filename
+        );
     }
 
     Ok(())

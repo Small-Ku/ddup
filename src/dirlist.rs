@@ -1,10 +1,10 @@
-use std::path::{PathBuf, Path};
 use std::io::Error;
+use std::path::{Path, PathBuf};
 
 use super::utils::{hash_map_to_paths, usn_records_to_hash_map};
 use super::Ntfs;
-use super::Volume;
 use super::UsnRange;
+use super::Volume;
 
 pub struct DirList {
     paths: Vec<PathBuf>,
@@ -26,14 +26,12 @@ impl DirList {
         let paths = hash_map_to_paths(&map);
 
         // Prepend the drive
-        let paths = paths.iter()
-            .map(|p| Path::new(drive).join(r"\").join(&p))
-            .collect();
+        let paths = paths.iter().map(|p| Path::new(drive).join(p)).collect();
 
         Ok(DirList { paths })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item=&PathBuf> {
+    pub fn iter(&self) -> impl Iterator<Item = &PathBuf> {
         self.paths.iter()
     }
 }
@@ -41,9 +39,9 @@ impl DirList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use walkdir;
-    use std::time::Instant;
     use std::collections::HashSet;
+    use std::time::Instant;
+    use walkdir;
 
     #[test]
     fn compare_walkdir_to_dirlist() {
@@ -57,7 +55,11 @@ mod tests {
                 }
             }
         }
-        println!("WalkDir got {} entries in {} seconds", v1.len(), instant.elapsed().as_secs_f32());
+        println!(
+            "WalkDir got {} entries in {} seconds",
+            v1.len(),
+            instant.elapsed().as_secs_f32()
+        );
 
         let instant = Instant::now();
         let mut v2 = Vec::new();
@@ -65,10 +67,14 @@ mod tests {
         for p in dirlist.iter() {
             v2.push(String::from(p.to_str().unwrap()));
         }
-        println!("Dirlist got {} entries in {} seconds", v2.len(), instant.elapsed().as_secs_f32());
+        println!(
+            "Dirlist got {} entries in {} seconds",
+            v2.len(),
+            instant.elapsed().as_secs_f32()
+        );
 
-        let set1: HashSet<String> = v1.iter().cloned().map(|s|s.to_lowercase()).collect();
-        let set2: HashSet<String> = v2.iter().cloned().map(|s|s.to_lowercase()).collect();
+        let set1: HashSet<String> = v1.iter().cloned().map(|s| s.to_lowercase()).collect();
+        let set2: HashSet<String> = v2.iter().cloned().map(|s| s.to_lowercase()).collect();
 
         println!("a - b:");
         for diff in set1.difference(&set2).into_iter().take(100) {

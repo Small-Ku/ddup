@@ -1,13 +1,15 @@
-use std::fs;
-use std::io::{self, Seek, Read};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::cmp::min;
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Read, Seek};
 use std::ops::FnMut;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Instant;
-use std::sync::{Mutex};
 
-use crc::{crc32, Hasher32};
+use crc::{Crc, CRC_32_ISO_HDLC};
+
+const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use indicatif::ProgressBar;
 
@@ -21,44 +23,56 @@ pub enum Comparison {
     Strict,
 }
 
-fn calculate_fuzzy_hash(size: u64, file: &mut fs::File) -> u32 {
-    let mut digest = crc32::Digest::new(crc32::IEEE);
+fn calculate_fuzzy_hash(size: u64, file: &mut fs::File) -> io::Result<u32> {
+    let mut digest = CRC.digest();
     let mut buffer = [0u8; 1024 * 4];
     let mut offset: u64 = 0;
 
     // Digest with exponentially decreasing density
     while offset + (buffer.len() as u64) < size {
-        file.seek(io::SeekFrom::Start(offset)).unwrap();
-        let bytes_read = file.read(&mut buffer).unwrap() as u64;
-        digest.write(&mut buffer[..bytes_read as usize]);
+        file.seek(io::SeekFrom::Start(offset))?;
+        let bytes_read = file.read(&mut buffer)? as u64;
+        if bytes_read == 0 {
+            break;
+        }
+        digest.update(&buffer[..bytes_read as usize]);
         offset += bytes_read;
         offset *= 2;
     }
 
     // Digest the last chunk
-    let offset_from_end = -min(size as i64, buffer.len() as i64);
-    file.seek(io::SeekFrom::End(offset_from_end)).unwrap();
-    file.read(&mut buffer).unwrap();
-    digest.write(&mut buffer);
+    let read_size = min(size, buffer.len() as u64) as usize;
+    if read_size > 0 {
+        let offset_from_end = -(read_size as i64);
+        file.seek(io::SeekFrom::End(offset_from_end))?;
+        file.read_exact(&mut buffer[..read_size])?;
+        digest.update(&buffer[..read_size]);
+    }
 
-    digest.sum32()
+    Ok(digest.finalize())
 }
 
 // @TODO: Replace this with sha512
-fn calculate_hash(file: &mut fs::File) -> u32 {
-    let mut digest = crc32::Digest::new(crc32::IEEE);
+fn calculate_hash(file: &mut fs::File) -> io::Result<u32> {
+    let mut digest = CRC.digest();
     let mut buffer = [0u8; 1024 * 4];
 
-    let mut bytes_read = file.read(&mut buffer).unwrap();
-    while bytes_read > 0 {
-        digest.write(&mut buffer[..bytes_read]);
-        bytes_read = file.read(&mut buffer).unwrap();
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        digest.update(&buffer[..bytes_read]);
     }
 
-    digest.sum32()
+    Ok(digest.finalize())
 }
 
-fn reduce_by_content<'a>(size: u64, paths: &[&'a Path], comparison: &Comparison) -> Vec<Vec<&'a Path>> {
+fn reduce_by_content<'a>(
+    size: u64,
+    paths: &[&'a Path],
+    comparison: &Comparison,
+) -> Vec<Vec<&'a Path>> {
     let mut map = HashMap::with_capacity(paths.len());
 
     // Group files by crc32 of beginning
@@ -68,31 +82,32 @@ fn reduce_by_content<'a>(size: u64, paths: &[&'a Path], comparison: &Comparison)
             _ => continue,
         };
 
-        let hash = match comparison {
+        let hash_result = match comparison {
             Comparison::Fuzzy => calculate_fuzzy_hash(size, &mut file),
             Comparison::Strict => calculate_hash(&mut file),
         };
-        map.entry(hash)
-            .or_insert(Vec::new())
-            .push(*path);
+
+        if let Ok(hash) = hash_result {
+            map.entry(hash).or_insert(Vec::new()).push(*path);
+        }
     }
 
     // Filter out single occurrences
-    map = map.into_iter()
-        .filter(|(_, v)| v.len() > 1)
-        .collect();
+    map.retain(|_, v| v.len() > 1);
 
     map.values().cloned().collect()
 }
 
-pub fn run<P>(drive: &str, filter: P, comparison: Comparison)
-    where P: FnMut(&&PathBuf) -> bool {
+pub fn run<P>(drive: &str, mut filter: P, comparison: Comparison) -> io::Result<()>
+where
+    P: FnMut(&&PathBuf) -> bool,
+{
     let instant = Instant::now();
 
     println!("[1/3] Generating recursive dirlist");
 
-    let dirlist = DirList::new(drive).unwrap();
-    let paths: Vec<&PathBuf> = dirlist.iter().filter(filter).collect();
+    let dirlist = DirList::new(drive)?;
+    let paths: Vec<&PathBuf> = dirlist.iter().filter(&mut filter).collect();
 
     println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
 
@@ -108,19 +123,15 @@ pub fn run<P>(drive: &str, filter: P, comparison: Comparison)
         progress.inc(1);
         let file_size = match fs::metadata(path) {
             Ok(m) => m.len(),
-            _ => continue
+            _ => continue,
         };
 
-        map.entry(file_size)
-            .or_insert(Vec::new())
-            .push(path);
+        map.entry(file_size).or_default().push(path);
     }
     progress.finish();
 
     // Filter out single occurrences
-    map = map.into_iter()
-        .filter(|(_, v)| v.len() > 1)
-        .collect();
+    map.retain(|_, v| v.len() > 1);
 
     println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
 
@@ -134,16 +145,15 @@ pub fn run<P>(drive: &str, filter: P, comparison: Comparison)
     // Iterate through size groups simultaneously
     keys.par_iter().for_each(|size: &u64| {
         let same_size_paths = &map[size];
-        for same_crc_paths in reduce_by_content(*size,
-                                                &same_size_paths,
-                                                &comparison).into_iter() {
+        for same_crc_paths in reduce_by_content(*size, same_size_paths, &comparison).into_iter() {
             let _guard = stdout_mutex.lock();
             println!("Potential duplicates [{} bytes]", size);
             for path in same_crc_paths {
-                println!("\t{}", path.to_str().unwrap());
+                println!("\t{}", path.display());
             }
         }
     });
 
     println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
+    Ok(())
 }

@@ -1,11 +1,11 @@
+pub mod algorithm;
+mod dirlist;
 mod ntfs;
+pub mod utils;
 mod volume;
 mod winioctl;
-mod dirlist;
-pub mod utils;
-pub mod algorithm;
 
-pub use ntfs::Ntfs;
-pub use ntfs::{UsnRange, UsnRecordType, UsnRecord, UsnRecordsIterator};
-pub use volume::Volume;
 pub use dirlist::DirList;
+pub use ntfs::Ntfs;
+pub use ntfs::{UsnRange, UsnRecord, UsnRecordType, UsnRecordsIterator};
+pub use volume::Volume;

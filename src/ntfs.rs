@@ -2,7 +2,7 @@ use std::io::Error;
 use std::ptr::null_mut;
 
 use super::volume::Volume;
-use super::winioctl::{USN_JOURNAL_DATA, CREATE_USN_JOURNAL_DATA, MFT_ENUM_DATA, USN_RECORD};
+use super::winioctl::{CREATE_USN_JOURNAL_DATA, MFT_ENUM_DATA, USN_JOURNAL_DATA, USN_RECORD};
 
 use winapi::shared::minwindef::{DWORD, LPDWORD, LPVOID};
 use winapi::shared::ntdef::USN;
@@ -77,9 +77,7 @@ impl<'a> UsnRecordsIterator<'a> {
         };
 
         if res != 0 {
-            self.reference_number = unsafe {
-                *(self.buffer.as_ptr() as *const u64)
-            };
+            self.reference_number = unsafe { *(self.buffer.as_ptr() as *const u64) };
 
             self.size = returned_bytes as usize;
             self.offset = std::mem::size_of_val(&self.reference_number);
@@ -102,34 +100,32 @@ impl<'a> Iterator for UsnRecordsIterator<'a> {
                     // EOF
                     return None;
                 }
-                Err(err) => { panic!("Usn records iteration failed with {}", err); }
-                _ => ()
+                Err(err) => {
+                    panic!("Usn records iteration failed with {}", err);
+                }
+                _ => (),
             }
         }
 
         let base = self.buffer.as_ptr();
-        let ptr = unsafe { base.offset(self.offset as isize) };
-        let usn_record: &USN_RECORD = unsafe { std::mem::transmute(ptr) };
+        let ptr = unsafe { base.add(self.offset) };
+        assert_eq!(ptr as usize % std::mem::align_of::<USN_RECORD>(), 0);
+        let usn_record: &USN_RECORD = unsafe { &*(ptr as *const USN_RECORD) };
 
+        let filename = unsafe { ptr.offset(usn_record.FileNameOffset as isize) as *const u16 };
         let filename = unsafe {
-            ptr.offset(usn_record.FileNameOffset as isize) as *const u16
-        };
-        let filename = unsafe {
-            std::slice::from_raw_parts(
-                filename,
-                (usn_record.FileNameLength / 2) as usize)
+            std::slice::from_raw_parts(filename, (usn_record.FileNameLength / 2) as usize)
         };
         let filename = String::from_utf16_lossy(filename);
 
         // Advance to next record
         self.offset += usn_record.RecordLength as usize;
 
-        let record_type =
-            if usn_record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                UsnRecordType::Directory
-            } else {
-                UsnRecordType::File
-            };
+        let record_type = if usn_record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            UsnRecordType::Directory
+        } else {
+            UsnRecordType::File
+        };
 
         Some(UsnRecord {
             id: usn_record.FileReferenceNumber,
@@ -197,6 +193,6 @@ impl Ntfs for Volume {
     }
 
     fn usn_records<'a>(&'a self, usn_range: &'a UsnRange) -> UsnRecordsIterator<'a> {
-        UsnRecordsIterator::new(&self, usn_range)
+        UsnRecordsIterator::new(self, usn_range)
     }
 }
