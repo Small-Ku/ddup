@@ -6,6 +6,7 @@ use glob::MatchOptions;
 
 use ddup::algorithm::{self, Comparison};
 use nanoserde::SerJson;
+use rayon::prelude::*;
 use std::fs;
 
 fn parse_args() -> ArgMatches {
@@ -59,6 +60,12 @@ fn parse_args() -> ArgMatches {
                 .help("Export the duplicated file list to a JSON file")
                 .num_args(1),
         )
+        .arg(
+            Arg::new("link")
+                .long("link")
+                .help("Replace duplicates with hardlinks")
+                .action(ArgAction::SetTrue),
+        )
         .get_matches()
 }
 
@@ -79,9 +86,13 @@ fn main() {
     let instant = Instant::now();
 
     // Determine the comparison method
-    let comparison = match args.get_flag("strict") {
-        true => Comparison::Strict,
-        false => Comparison::Fuzzy,
+    let comparison = if args.get_flag("strict") || args.get_flag("link") {
+        if args.get_flag("link") && !args.get_flag("strict") {
+            log::warn!("Hardlink option enabled: Forcing strict comparison to prevent data loss.");
+        }
+        Comparison::Strict
+    } else {
+        Comparison::Fuzzy
     };
 
     // Determine the backend preference
@@ -141,6 +152,54 @@ fn main() {
         let json = duplicates.serialize_json();
         fs::write(export_path, json).expect("Failed to write export file");
         log::info!("Exported {} groups to {}", duplicates.len(), export_path);
+    }
+
+    if args.get_flag("link") {
+        let freed_space: u64 = duplicates
+            .par_iter()
+            .map(|group| {
+                let mut group_freed = 0;
+                if let Some(first) = group.paths.first() {
+                    for path in &group.paths[1..] {
+                        log::info!("Linking {} -> {}", path, first);
+                        let tmp_path = format!("{}.ddup_tmp", path);
+
+                        if let Err(e) = fs::rename(path, &tmp_path) {
+                            log::error!("Failed to prepare link for {} (move failed): {}", path, e);
+                            continue;
+                        }
+
+                        if let Err(e) = fs::hard_link(first, path) {
+                            log::error!(
+                                "Failed to link {} to {}: {}. Restoring original...",
+                                path,
+                                first,
+                                e
+                            );
+                            if let Err(restore_e) = fs::rename(&tmp_path, path) {
+                                log::error!(
+                                    "CRITICAL: Failed to restore {} from backup: {}",
+                                    path,
+                                    restore_e
+                                );
+                            }
+                        } else {
+                            if let Err(e) = fs::remove_file(&tmp_path) {
+                                log::warn!("Failed to remove backup file {}: {}", tmp_path, e);
+                            } else {
+                                group_freed += group.size;
+                            }
+                        }
+                    }
+                }
+                group_freed
+            })
+            .sum();
+
+        log::info!(
+            "Deduplication complete. Estimated space freed: {} bytes",
+            freed_space
+        );
     }
 
     if export_path.is_none() || args.get_flag("verbose") {
