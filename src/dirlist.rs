@@ -35,8 +35,9 @@ impl DirList {
                         query.push('\\');
                     }
                     if let Some(m) = matcher {
-                        query.push(' ');
+                        query.push_str(" \"");
                         query.push_str(m);
+                        query.push('"');
                     }
 
                     match everything.get_all_files(&query, options.case_sensitive) {
