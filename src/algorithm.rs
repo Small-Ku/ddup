@@ -1,3 +1,4 @@
+use crate::error::Result;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs;
@@ -79,18 +80,18 @@ pub fn run(
     options: glob::MatchOptions,
     comparison: Comparison,
     backend: crate::dirlist::Backend,
-) -> io::Result<Vec<DuplicateGroup>> {
+) -> Result<Vec<DuplicateGroup>> {
     let instant = Instant::now();
 
-    println!("[1/3] Generating recursive dirlist");
+    log::info!("[1/3] Generating recursive dirlist");
 
     let dirlist = DirList::new(drive, matcher, options, backend)?;
 
-    println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
+    log::info!("Finished in {} seconds", instant.elapsed().as_secs_f32());
 
     let instant = Instant::now();
 
-    println!("[2/3] Grouping by file size");
+    log::info!("[2/3] Grouping by file size");
 
     // Group files by size
     let entries: Vec<&(PathBuf, u64)> = dirlist.iter().collect();
@@ -106,17 +107,21 @@ pub fn run(
     // Filter out single occurrences
     map.retain(|_, v| v.len() > 1);
 
-    println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
+    log::info!("Finished in {} seconds", instant.elapsed().as_secs_f32());
 
     let instant = Instant::now();
 
-    println!("[3/3] Grouping by hash in thread pool");
+    log::info!("[3/3] Grouping by hash in thread pool");
 
     // Print all duplicates and collect them
     let duplicates = Mutex::new(Vec::new());
     let keys: Vec<u64> = map.keys().cloned().collect();
+
+    let progress = ProgressBar::new(keys.len() as u64);
+
     // Iterate through size groups simultaneously
     keys.par_iter().for_each(|size: &u64| {
+        progress.inc(1);
         let same_size_paths = &map[size];
 
         // Parallelize the hashing of files within the same size group
@@ -165,14 +170,15 @@ pub fn run(
                     paths: paths.clone(),
                 });
             }
-
-            println!("Potential duplicates [{} bytes]", size);
-            for path in &paths {
-                println!("\t{}", path);
-            }
         }
     });
 
-    println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
-    Ok(duplicates.into_inner().unwrap())
+    progress.finish();
+
+    log::info!("Finished in {} seconds", instant.elapsed().as_secs_f32());
+    duplicates
+        .into_inner()
+        .map_err(|_| crate::error::AppError::LockPoison {
+            message: "Duplicate groups mutex was poisoned".to_string(),
+        })
 }

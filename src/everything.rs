@@ -28,10 +28,10 @@ impl EverythingSearch {
             }
 
             if client.is_null() {
-                eprintln!("[Everything] Error: Could not connect to Everything service (ConnectUTF8 returned NULL for default and 1.5a instances)");
+                log::error!("[Everything] Error: Could not connect to Everything service (ConnectUTF8 returned NULL for default and 1.5a instances)");
                 None
             } else {
-                eprintln!(
+                log::debug!(
                     "[Everything] Debug: Connected to '{}' instance",
                     instance_used
                 );
@@ -40,12 +40,17 @@ impl EverythingSearch {
         }
     }
 
-    pub fn get_all_files(&self, query_str: &str, case_sensitive: bool) -> Vec<(PathBuf, u64)> {
-        let results_vec = Vec::new(); // Initial empty vec, will be replaced by collect
+    pub fn get_all_files(
+        &self,
+        query_str: &str,
+        case_sensitive: bool,
+    ) -> crate::error::Result<Vec<(PathBuf, u64)>> {
         unsafe {
             let search_state = Everything3_CreateSearchState();
             if search_state.is_null() {
-                return results_vec;
+                return Err(crate::error::AppError::Everything {
+                    message: "Failed to create search state".to_string(),
+                });
             }
 
             // Request necessary properties
@@ -75,7 +80,7 @@ impl EverythingSearch {
             let query = CString::new(query_str).unwrap();
             Everything3_SetSearchTextUTF8(search_state, query.as_ptr() as *const u8);
 
-            eprintln!(
+            log::debug!(
                 "[Everything] Debug: Executing search with query: {}",
                 query_str
             );
@@ -83,17 +88,20 @@ impl EverythingSearch {
 
             if results.is_null() {
                 let err = Everything3_GetLastError();
-                eprintln!(
+                log::error!(
                     "[Everything] Error: Search for '{}' failed with error code {}",
-                    query_str, err
+                    query_str,
+                    err
                 );
                 Everything3_DestroySearchState(search_state);
-                return results_vec;
+                return Err(crate::error::AppError::Everything {
+                    message: format!("Search for '{}' failed with error code {}", query_str, err),
+                });
             }
 
             let count = Everything3_GetResultListCount(results);
             if count == 0 {
-                eprintln!(
+                log::debug!(
                     "[Everything] Debug: Search for '{}' returned 0 results",
                     query_str
                 );
@@ -113,7 +121,7 @@ impl EverythingSearch {
                     let results = results_ptr.0;
                     let mut buffer = [0u8; 4096]; // Thread-local buffer
 
-                     // Skip directories (FILE_ATTRIBUTE_DIRECTORY = 0x10)
+                    // Skip directories (FILE_ATTRIBUTE_DIRECTORY = 0x10)
                     let attributes = Everything3_GetResultAttributes(results, i);
                     if (attributes & 0x00000010) != 0 {
                         skipped_dirs.fetch_add(1, Ordering::Relaxed);
@@ -189,7 +197,8 @@ impl EverythingSearch {
                             buffer.len() as u64,
                         );
                         if len2 > 0 {
-                            let path_str = std::str::from_utf8(&buffer[..len2 as usize]).unwrap_or("");
+                            let path_str =
+                                std::str::from_utf8(&buffer[..len2 as usize]).unwrap_or("");
                             let size = Everything3_GetResultSize(results, i);
                             added_files.fetch_add(1, Ordering::Relaxed);
                             Some((PathBuf::from(path_str), size))
@@ -207,19 +216,19 @@ impl EverythingSearch {
                 .flatten()
                 .collect();
 
-            eprintln!(
+            log::debug!(
                 "[Everything] Debug: Processed {} results - {} dirs skipped, {} zero-length paths, {} hardlinks skipped, {} files added",
-                count, 
-                skipped_dirs.load(Ordering::Relaxed), 
-                zero_len_paths.load(Ordering::Relaxed), 
-                skipped_hardlinks.load(Ordering::Relaxed), 
+                count,
+                skipped_dirs.load(Ordering::Relaxed),
+                zero_len_paths.load(Ordering::Relaxed),
+                skipped_hardlinks.load(Ordering::Relaxed),
                 added_files.load(Ordering::Relaxed)
             );
 
             Everything3_DestroyResultList(results);
             Everything3_DestroySearchState(search_state);
-            
-            collected_results
+
+            Ok(collected_results)
         }
     }
 }

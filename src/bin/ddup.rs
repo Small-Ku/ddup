@@ -12,6 +12,13 @@ fn parse_args() -> ArgMatches {
     Command::new("ddup")
         .about("This tool identifies duplicated files in Windows NTFS Volumes")
         .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Enable verbose logging")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("drive")
                 .help("The drive letter to scan (example `C:`)")
                 .required(true)
@@ -59,6 +66,13 @@ fn parse_args() -> ArgMatches {
 fn main() {
     let args = parse_args();
 
+    if args.get_flag("verbose") {
+        std::env::set_var("RUST_LOG", "debug");
+    } else {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     let drive = args
         .get_one::<String>("drive")
         .expect("Drive format is `<letter>:`");
@@ -80,7 +94,7 @@ fn main() {
 
     let result = if let Some(pattern) = args.get_one::<String>("match") {
         let is_sensitive = !args.get_flag("i");
-        println!(
+        log::info!(
             "Scanning drive {} with matcher `{}` ({}) [{:?} comparison, preference: {:?}]",
             drive,
             pattern,
@@ -101,9 +115,11 @@ fn main() {
 
         algorithm::run(drive, Some(pattern), options, comparison, backend)
     } else {
-        println!(
+        log::info!(
             "Scanning drive {} [{:?} comparison, preference: {:?}]",
-            drive, comparison, backend
+            drive,
+            comparison,
+            backend
         );
         let options = MatchOptions {
             case_sensitive: false,
@@ -113,15 +129,31 @@ fn main() {
         algorithm::run(drive, None, options, comparison, backend)
     };
 
-    let duplicates = result.expect("Failed to run duplicate detection");
+    let duplicates = match result {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("Failed to run duplicate detection: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    if let Some(export_path) = args.get_one::<String>("export") {
+    let export_path = args.get_one::<String>("export");
+    if let Some(export_path) = export_path {
         let json = duplicates.serialize_json();
         fs::write(export_path, json).expect("Failed to write export file");
-        println!("Exported {} groups to {}", duplicates.len(), export_path);
+        log::info!("Exported {} groups to {}", duplicates.len(), export_path);
     }
 
-    println!(
+    if export_path.is_none() || args.get_flag("verbose") {
+        for group in &duplicates {
+            println!("Potential duplicates [{} bytes]", group.size);
+            for path in &group.paths {
+                println!("\t{}", path);
+            }
+        }
+    }
+
+    log::info!(
         "Overall finished in {} seconds",
         instant.elapsed().as_secs_f32()
     );

@@ -1,5 +1,7 @@
+use crate::error::Result;
+use indicatif::ProgressBar;
 use rayon::prelude::*;
-use std::io::Error;
+use snafu::ResultExt;
 use std::path::{Path, PathBuf};
 
 use super::utils::{hash_map_to_paths, usn_records_to_hash_map};
@@ -23,7 +25,7 @@ impl DirList {
         matcher: Option<&str>,
         options: glob::MatchOptions,
         backend: Backend,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self> {
         match backend {
             Backend::Everything => {
                 if let Some(everything) = super::everything::EverythingSearch::new() {
@@ -37,22 +39,31 @@ impl DirList {
                         query.push_str(m);
                     }
 
-                    let entries = everything.get_all_files(&query, options.case_sensitive);
-                    if !entries.is_empty() {
-                        return Ok(DirList { entries });
+                    match everything.get_all_files(&query, options.case_sensitive) {
+                        Ok(entries) => {
+                            if !entries.is_empty() {
+                                return Ok(DirList { entries });
+                            }
+                            log::warn!(
+                                "[Everything] Warning: Search returned no results, falling back to USN"
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("[Everything] Error: {}, falling back to USN", e);
+                        }
                     }
-                    eprintln!(
-                        "[Everything] Warning: Search returned no results, falling back to USN"
-                    );
                 } else {
-                    eprintln!("[Everything] Warning: Service not found, falling back to USN");
+                    log::warn!("[Everything] Warning: Service not found, falling back to USN");
                 }
                 // Fallback to USN
                 Self::new(drive, matcher, options, Backend::USN)
             }
             Backend::USN => {
-                let volume = Volume::open(&(String::from(r"\\.\") + drive))?;
-                let journal = volume.query_usn_journal()?;
+                let volume = Volume::open(&(String::from(r"\\.\") + drive))
+                    .context(crate::error::VolumeOpenSnafu { drive })?;
+                let journal = volume
+                    .query_usn_journal()
+                    .context(crate::error::UsnJournalQuerySnafu)?;
                 let range = UsnRange {
                     low: journal.LowestValidUsn,
                     high: journal.NextUsn,
@@ -62,15 +73,25 @@ impl DirList {
                 let paths = hash_map_to_paths(&map);
 
                 let pattern =
-                    matcher.map(|m| glob::Pattern::new(m).expect("Illegal matcher syntax"));
+                    matcher.map(|m| glob::Pattern::new(m).context(crate::error::GlobSnafu));
+                let pattern = match pattern {
+                    Some(Ok(p)) => Some(p),
+                    Some(Err(e)) => return Err(e),
+                    None => None,
+                };
 
+                log::info!("Processing {} paths from USN journal", paths.len());
+                let progress = ProgressBar::new(paths.len() as u64);
                 let entries: Vec<_> = paths
                     .par_iter()
-                    .map(|p| Path::new(drive).join(p))
+                    .map(|p| {
+                        progress.inc(1);
+                        Path::new(drive).join(p)
+                    })
                     .filter(|full_path| {
                         pattern
                             .as_ref()
-                            .map_or(true, |pat| pat.matches_path_with(full_path, options))
+                            .is_none_or(|pat| pat.matches_path_with(full_path, options))
                     })
                     .filter_map(|full_path| {
                         std::fs::metadata(&full_path)
@@ -79,6 +100,7 @@ impl DirList {
                             .map(|m| (full_path, m.len()))
                     })
                     .collect();
+                progress.finish();
 
                 Ok(DirList { entries })
             }

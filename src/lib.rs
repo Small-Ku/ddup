@@ -1,5 +1,6 @@
 pub mod algorithm;
-mod dirlist;
+pub mod dirlist;
+pub mod error;
 pub mod everything;
 mod ntfs;
 pub mod utils;
