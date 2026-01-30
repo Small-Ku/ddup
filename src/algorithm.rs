@@ -2,14 +2,13 @@ use crate::error::Result;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Seek};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crc::{Crc, CRC_32_ISO_HDLC};
-
-const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+use rapidhash::fast::RapidHasher;
+use std::hash::Hasher;
 
 use indicatif::ProgressBar;
 use nanoserde::SerJson;
@@ -29,49 +28,40 @@ pub enum Comparison {
     Strict,
 }
 
-fn calculate_fuzzy_hash(size: u64, file: &mut fs::File) -> io::Result<u32> {
-    let mut digest = CRC.digest();
-    let mut buffer = [0u8; 1024 * 4];
+fn calculate_fuzzy_hash(size: u64, path: &Path) -> io::Result<u64> {
+    if size == 0 {
+        return Ok(0);
+    }
+
+    let file = fs::File::open(path)?;
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let mut hasher = RapidHasher::default();
     let mut offset: u64 = 0;
+    let chunk_size: u64 = 4096;
 
     // Digest with exponentially decreasing density
-    while offset + (buffer.len() as u64) < size {
-        file.seek(io::SeekFrom::Start(offset))?;
-        let bytes_read = file.read(&mut buffer)? as u64;
-        if bytes_read == 0 {
-            break;
-        }
-        digest.update(&buffer[..bytes_read as usize]);
-        offset += bytes_read;
+    while offset + chunk_size < size {
+        let chunk = &mmap[offset as usize..(offset + chunk_size) as usize];
+        hasher.write(chunk);
+        offset += chunk_size;
         offset *= 2;
     }
 
     // Digest the last chunk
-    let read_size = min(size, buffer.len() as u64) as usize;
+    let read_size = min(size, chunk_size) as usize;
     if read_size > 0 {
-        let offset_from_end = -(read_size as i64);
-        file.seek(io::SeekFrom::End(offset_from_end))?;
-        file.read_exact(&mut buffer[..read_size])?;
-        digest.update(&buffer[..read_size]);
+        let start = (size as usize).saturating_sub(read_size);
+        let chunk = &mmap[start..size as usize];
+        hasher.write(chunk);
     }
 
-    Ok(digest.finalize())
+    Ok(hasher.finish())
 }
 
-// @TODO: Replace this with sha512
-fn calculate_hash(file: &mut fs::File) -> io::Result<u32> {
-    let mut digest = CRC.digest();
-    let mut buffer = [0u8; 1024 * 4];
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        digest.update(&buffer[..bytes_read]);
-    }
-
-    Ok(digest.finalize())
+fn calculate_full_hash(path: &Path) -> io::Result<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_mmap(path)?;
+    Ok(hasher.finalize())
 }
 
 pub fn run(
@@ -126,20 +116,18 @@ pub fn run(
 
         // Parallelize the hashing of files within the same size group
         let reduced_groups: Vec<Vec<&Path>> = if same_size_paths.len() > 1 {
-            let mut reduced_map: HashMap<u32, Vec<&Path>> = HashMap::new();
+            // Group by hash locally
+            let mut reduced_map: HashMap<String, Vec<&Path>> = HashMap::new();
 
             // Collect hashes in parallel
-            let hashes: Vec<Option<(u32, &Path)>> = same_size_paths
+            let hashes: Vec<Option<(String, &Path)>> = same_size_paths
                 .par_iter()
                 .map(|path| {
-                    let mut file = match fs::File::open(path) {
-                        Ok(f) => f,
-                        _ => return None,
-                    };
-
                     let hash_result = match comparison {
-                        Comparison::Fuzzy => calculate_fuzzy_hash(*size, &mut file),
-                        Comparison::Strict => calculate_hash(&mut file),
+                        Comparison::Fuzzy => {
+                            calculate_fuzzy_hash(*size, path).map(|h| h.to_string())
+                        }
+                        Comparison::Strict => calculate_full_hash(path).map(|h| h.to_string()),
                     };
 
                     hash_result.ok().map(|hash| (hash, *path))
@@ -157,8 +145,8 @@ pub fn run(
             Vec::new()
         };
 
-        for same_crc_paths in reduced_groups {
-            let paths: Vec<String> = same_crc_paths
+        for same_hash_paths in reduced_groups {
+            let paths: Vec<String> = same_hash_paths
                 .into_iter()
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
