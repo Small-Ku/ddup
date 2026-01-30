@@ -12,10 +12,16 @@ use crc::{Crc, CRC_32_ISO_HDLC};
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use indicatif::ProgressBar;
-
+use nanoserde::SerJson;
 use rayon::prelude::*;
 
 use super::DirList;
+
+#[derive(SerJson, Debug, Clone)]
+pub struct DuplicateGroup {
+    pub size: u64,
+    pub paths: Vec<String>,
+}
 
 #[derive(Debug)]
 pub enum Comparison {
@@ -98,7 +104,7 @@ fn reduce_by_content<'a>(
     map.values().cloned().collect()
 }
 
-pub fn run<P>(drive: &str, mut filter: P, comparison: Comparison) -> io::Result<()>
+pub fn run<P>(drive: &str, mut filter: P, comparison: Comparison) -> io::Result<Vec<DuplicateGroup>>
 where
     P: FnMut(&&PathBuf) -> bool,
 {
@@ -139,21 +145,33 @@ where
 
     println!("[3/3] Grouping by hash in thread pool");
 
-    // Print all duplicates
-    let stdout_mutex = Mutex::new(0);
+    // Print all duplicates and collect them
+    let duplicates = Mutex::new(Vec::new());
     let keys: Vec<u64> = map.keys().cloned().collect();
     // Iterate through size groups simultaneously
     keys.par_iter().for_each(|size: &u64| {
         let same_size_paths = &map[size];
         for same_crc_paths in reduce_by_content(*size, same_size_paths, &comparison).into_iter() {
-            let _guard = stdout_mutex.lock();
+            let paths: Vec<String> = same_crc_paths
+                .into_iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+
+            {
+                let mut guard = duplicates.lock().unwrap();
+                guard.push(DuplicateGroup {
+                    size: *size,
+                    paths: paths.clone(),
+                });
+            }
+
             println!("Potential duplicates [{} bytes]", size);
-            for path in same_crc_paths {
-                println!("\t{}", path.display());
+            for path in &paths {
+                println!("\t{}", path);
             }
         }
     });
 
     println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
-    Ok(())
+    Ok(duplicates.into_inner().unwrap())
 }

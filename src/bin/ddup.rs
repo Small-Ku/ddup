@@ -6,6 +6,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use glob::{MatchOptions, Pattern};
 
 use ddup::algorithm::{self, Comparison};
+use nanoserde::SerJson;
+use std::fs;
 
 fn parse_args() -> ArgMatches {
     Command::new("ddup")
@@ -36,6 +38,14 @@ fn parse_args() -> ArgMatches {
                 .help("Do not perform fuzzy hashing, guarantees equivalence")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("export")
+                .short('e')
+                .long("export")
+                .value_name("FILE")
+                .help("Export the duplicated file list to a JSON file")
+                .num_args(1),
+        )
         .get_matches()
 }
 
@@ -54,7 +64,7 @@ fn main() {
         false => Comparison::Fuzzy,
     };
 
-    if let Some(pattern) = args.get_one::<String>("match") {
+    let result = if let Some(pattern) = args.get_one::<String>("match") {
         let is_sensitive = !args.get_flag("i");
         println!(
             "Scanning drive {} with matcher `{}` ({}) [{:?} comparison]",
@@ -83,10 +93,17 @@ fn main() {
             },
             comparison,
         )
-        .expect("Failed to run duplicate detection");
     } else {
         println!("Scanning drive {} [{:?} comparison]", drive, comparison);
-        algorithm::run(drive, |_| true, comparison).expect("Failed to run duplicate detection");
+        algorithm::run(drive, |_| true, comparison)
+    };
+
+    let duplicates = result.expect("Failed to run duplicate detection");
+
+    if let Some(export_path) = args.get_one::<String>("export") {
+        let json = duplicates.serialize_json();
+        fs::write(export_path, json).expect("Failed to write export file");
+        println!("Exported {} groups to {}", duplicates.len(), export_path);
     }
 
     println!(
