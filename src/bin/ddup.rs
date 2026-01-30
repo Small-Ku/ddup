@@ -1,9 +1,8 @@
-use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use glob::{MatchOptions, Pattern};
+use glob::MatchOptions;
 
 use ddup::algorithm::{self, Comparison};
 use nanoserde::SerJson;
@@ -39,6 +38,14 @@ fn parse_args() -> ArgMatches {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("force-usn")
+                .long("force-usn")
+                .help(
+                    "Force manual USN journal traversal (disables Everything search and fallback)",
+                )
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("export")
                 .short('e')
                 .long("export")
@@ -64,10 +71,17 @@ fn main() {
         false => Comparison::Fuzzy,
     };
 
+    // Determine the backend preference
+    let backend = if args.get_flag("force-usn") {
+        ddup::Backend::USN
+    } else {
+        ddup::Backend::Everything
+    };
+
     let result = if let Some(pattern) = args.get_one::<String>("match") {
         let is_sensitive = !args.get_flag("i");
         println!(
-            "Scanning drive {} with matcher `{}` ({}) [{:?} comparison]",
+            "Scanning drive {} with matcher `{}` ({}) [{:?} comparison, preference: {:?}]",
             drive,
             pattern,
             if is_sensitive {
@@ -75,7 +89,8 @@ fn main() {
             } else {
                 "case-insensitive"
             },
-            comparison
+            comparison,
+            backend
         );
 
         let options = MatchOptions {
@@ -84,18 +99,18 @@ fn main() {
             require_literal_separator: false,
         };
 
-        algorithm::run(
-            drive,
-            |path: &&PathBuf| {
-                Pattern::new(pattern)
-                    .expect("Illegal matcher syntax")
-                    .matches_path_with(path.as_path(), options)
-            },
-            comparison,
-        )
+        algorithm::run(drive, Some(pattern), options, comparison, backend)
     } else {
-        println!("Scanning drive {} [{:?} comparison]", drive, comparison);
-        algorithm::run(drive, |_| true, comparison)
+        println!(
+            "Scanning drive {} [{:?} comparison, preference: {:?}]",
+            drive, comparison, backend
+        );
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_leading_dot: false,
+            require_literal_separator: false,
+        };
+        algorithm::run(drive, None, options, comparison, backend)
     };
 
     let duplicates = result.expect("Failed to run duplicate detection");

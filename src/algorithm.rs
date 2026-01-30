@@ -2,7 +2,6 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Seek};
-use std::ops::FnMut;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -104,16 +103,18 @@ fn reduce_by_content<'a>(
     map.values().cloned().collect()
 }
 
-pub fn run<P>(drive: &str, mut filter: P, comparison: Comparison) -> io::Result<Vec<DuplicateGroup>>
-where
-    P: FnMut(&&PathBuf) -> bool,
-{
+pub fn run(
+    drive: &str,
+    matcher: Option<&str>,
+    options: glob::MatchOptions,
+    comparison: Comparison,
+    backend: crate::dirlist::Backend,
+) -> io::Result<Vec<DuplicateGroup>> {
     let instant = Instant::now();
 
     println!("[1/3] Generating recursive dirlist");
 
-    let dirlist = DirList::new(drive)?;
-    let paths: Vec<&PathBuf> = dirlist.iter().filter(&mut filter).collect();
+    let dirlist = DirList::new(drive, matcher, options, backend)?;
 
     println!("Finished in {} seconds", instant.elapsed().as_secs_f32());
 
@@ -122,17 +123,13 @@ where
     println!("[2/3] Grouping by file size");
 
     // Group files by size
-    let mut map: HashMap<u64, Vec<&Path>> = HashMap::with_capacity(paths.len());
-    let progress = ProgressBar::new(paths.len() as u64);
+    let entries: Vec<&(PathBuf, u64)> = dirlist.iter().collect();
+    let mut map: HashMap<u64, Vec<&Path>> = HashMap::with_capacity(entries.len());
+    let progress = ProgressBar::new(entries.len() as u64);
 
-    for path in paths.into_iter() {
+    for (path, file_size) in entries.into_iter() {
         progress.inc(1);
-        let file_size = match fs::metadata(path) {
-            Ok(m) => m.len(),
-            _ => continue,
-        };
-
-        map.entry(file_size).or_default().push(path);
+        map.entry(*file_size).or_default().push(path);
     }
     progress.finish();
 

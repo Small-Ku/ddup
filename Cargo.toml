@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 nanoserde = "0.2.1"
+everything3-sys = { path = "everything3-sys" }
 
 [dependencies.winapi]
 version = "0.3"

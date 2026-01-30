@@ -6,33 +6,86 @@ use super::Ntfs;
 use super::UsnRange;
 use super::Volume;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Everything,
+    USN,
+}
+
 pub struct DirList {
-    paths: Vec<PathBuf>,
+    entries: Vec<(PathBuf, u64)>,
 }
 
 impl DirList {
-    pub fn new(drive: &str) -> Result<Self, Error> {
-        let volume = Volume::open(&(String::from(r"\\.\") + drive))?;
+    pub fn new(
+        drive: &str,
+        matcher: Option<&str>,
+        options: glob::MatchOptions,
+        backend: Backend,
+    ) -> Result<Self, Error> {
+        match backend {
+            Backend::Everything => {
+                if let Some(everything) = super::everything::EverythingSearch::new() {
+                    // Combine drive and matcher for Everything search
+                    let mut query = drive.to_string();
+                    if !query.ends_with('\\') {
+                        query.push('\\');
+                    }
+                    if let Some(m) = matcher {
+                        query.push(' ');
+                        query.push_str(m);
+                    }
 
-        let journal = volume.query_usn_journal()?;
+                    let entries = everything.get_all_files(&query, options.case_sensitive);
+                    if !entries.is_empty() {
+                        return Ok(DirList { entries });
+                    }
+                    eprintln!(
+                        "[Everything] Warning: Search returned no results, falling back to USN"
+                    );
+                } else {
+                    eprintln!("[Everything] Warning: Service not found, falling back to USN");
+                }
+                // Fallback to USN
+                Self::new(drive, matcher, options, Backend::USN)
+            }
+            Backend::USN => {
+                let volume = Volume::open(&(String::from(r"\\.\") + drive))?;
+                let journal = volume.query_usn_journal()?;
+                let range = UsnRange {
+                    low: journal.LowestValidUsn,
+                    high: journal.NextUsn,
+                };
+                let usn_records = volume.usn_records(&range);
+                let map = usn_records_to_hash_map(usn_records);
+                let paths = hash_map_to_paths(&map);
 
-        let range = UsnRange {
-            low: journal.LowestValidUsn,
-            high: journal.NextUsn,
-        };
+                let pattern =
+                    matcher.map(|m| glob::Pattern::new(m).expect("Illegal matcher syntax"));
 
-        let usn_records = volume.usn_records(&range);
-        let map = usn_records_to_hash_map(usn_records);
-        let paths = hash_map_to_paths(&map);
+                let entries = paths
+                    .into_iter()
+                    .map(|p| Path::new(drive).join(p))
+                    .filter(|full_path| {
+                        pattern
+                            .as_ref()
+                            .map_or(true, |pat| pat.matches_path_with(full_path, options))
+                    })
+                    .filter_map(|full_path| {
+                        std::fs::metadata(&full_path)
+                            .ok()
+                            .filter(|m| m.is_file())
+                            .map(|m| (full_path, m.len()))
+                    })
+                    .collect();
 
-        // Prepend the drive
-        let paths = paths.iter().map(|p| Path::new(drive).join(p)).collect();
-
-        Ok(DirList { paths })
+                Ok(DirList { entries })
+            }
+        }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &PathBuf> {
-        self.paths.iter()
+    pub fn iter(&self) -> impl Iterator<Item = &(PathBuf, u64)> {
+        self.entries.iter()
     }
 }
 
@@ -63,8 +116,13 @@ mod tests {
 
         let instant = Instant::now();
         let mut v2 = Vec::new();
-        let dirlist = DirList::new("C:").unwrap();
-        for p in dirlist.iter() {
+        let options = glob::MatchOptions {
+            case_sensitive: false,
+            require_literal_leading_dot: false,
+            require_literal_separator: false,
+        };
+        let dirlist = DirList::new("C:", None, options, Backend::USN).unwrap();
+        for (p, _) in dirlist.iter() {
             v2.push(String::from(p.to_str().unwrap()));
         }
         println!(

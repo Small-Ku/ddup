@@ -1,0 +1,11 @@
+[package]
+name = "everything3-sys"
+version = "0.1.0"
+description = "FFI bindings for Everything SDK 3.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.71"
