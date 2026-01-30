@@ -1,7 +1,14 @@
 use everything3_sys::*;
+use rayon::prelude::*;
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Wrapper to allow passing raw pointers to rayon threads
+struct SendPtr<T>(*mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T> Sync for SendPtr<T> {}
 
 pub struct EverythingSearch {
     client: *mut EVERYTHING3_CLIENT,
@@ -34,7 +41,7 @@ impl EverythingSearch {
     }
 
     pub fn get_all_files(&self, query_str: &str, case_sensitive: bool) -> Vec<(PathBuf, u64)> {
-        let mut results_vec = Vec::new();
+        let results_vec = Vec::new(); // Initial empty vec, will be replaced by collect
         unsafe {
             let search_state = Everything3_CreateSearchState();
             if search_state.is_null() {
@@ -65,10 +72,6 @@ impl EverythingSearch {
             Everything3_SetSearchMatchCase(search_state, if case_sensitive { 1 } else { 0 });
             Everything3_SetSearchRequestTotalSize(search_state, 1);
 
-            // Match path is important for drive-based searches
-            Everything3_SetSearchMatchPath(search_state, 1);
-            Everything3_SetSearchRequestTotalSize(search_state, 1);
-
             let query = CString::new(query_str).unwrap();
             Everything3_SetSearchTextUTF8(search_state, query.as_ptr() as *const u8);
 
@@ -95,115 +98,129 @@ impl EverythingSearch {
                     query_str
                 );
             }
-            results_vec.reserve(count as usize);
 
-            let mut buffer = [0u8; 4096];
-            let mut skipped_dirs = 0u64;
-            let mut zero_len_paths = 0u64;
-            let mut added_files = 0u64;
-            let mut skipped_hardlinks = 0u64;
+            let skipped_dirs = AtomicU64::new(0);
+            let zero_len_paths = AtomicU64::new(0);
+            let added_files = AtomicU64::new(0);
+            let skipped_hardlinks = AtomicU64::new(0);
 
-            for i in 0..count {
-                // Skip directories (FILE_ATTRIBUTE_DIRECTORY = 0x10)
-                let attributes = Everything3_GetResultAttributes(results, i);
-                if (attributes & 0x00000010) != 0 {
-                    skipped_dirs += 1;
-                    continue;
-                }
+            // Wrap pointer for rayon
+            let results_ptr = SendPtr(results);
 
-                // Check hardlinks
-                let hl_count = Everything3_GetResultPropertyDWORD(
-                    results,
-                    i,
-                    EVERYTHING3_PROPERTY_ID_HARD_LINK_COUNT,
-                );
-                if hl_count > 1 {
-                    // Get all hardlink names
-                    let len_hl = Everything3_GetResultPropertyTextUTF8(
+            let collected_results: Vec<(PathBuf, u64)> = (0..count)
+                .into_par_iter()
+                .map(|i| {
+                    let results = results_ptr.0;
+                    let mut buffer = [0u8; 4096]; // Thread-local buffer
+
+                     // Skip directories (FILE_ATTRIBUTE_DIRECTORY = 0x10)
+                    let attributes = Everything3_GetResultAttributes(results, i);
+                    if (attributes & 0x00000010) != 0 {
+                        skipped_dirs.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+
+                    // Check hardlinks
+                    let hl_count = Everything3_GetResultPropertyDWORD(
                         results,
                         i,
-                        EVERYTHING3_PROPERTY_ID_HARD_LINK_FILE_NAMES,
-                        buffer.as_mut_ptr(),
-                        buffer.len() as u64,
+                        EVERYTHING3_PROPERTY_ID_HARD_LINK_COUNT,
                     );
-                    if len_hl > 0 {
-                        let hl_names_str =
-                            std::str::from_utf8(&buffer[..len_hl as usize]).unwrap_or("");
-                        let mut names: Vec<&str> = hl_names_str.split(';').collect();
-
-                        let mut current_path_buffer = [0u8; 4096];
-                        let len_cur = Everything3_GetResultFullPathNameUTF8(
+                    if hl_count > 1 {
+                        // Get all hardlink names
+                        let len_hl = Everything3_GetResultPropertyTextUTF8(
                             results,
                             i,
-                            current_path_buffer.as_mut_ptr(),
-                            current_path_buffer.len() as u64,
+                            EVERYTHING3_PROPERTY_ID_HARD_LINK_FILE_NAMES,
+                            buffer.as_mut_ptr(),
+                            buffer.len() as u64,
                         );
-                        if len_cur > 0 {
-                            let current_path_full =
-                                std::str::from_utf8(&current_path_buffer[..len_cur as usize])
-                                    .unwrap_or("");
-                            // Strip drive letter "X:" if present
-                            let current_path_suffix = if current_path_full.len() >= 2
-                                && current_path_full.chars().nth(1) == Some(':')
-                            {
-                                &current_path_full[2..]
-                            } else {
-                                current_path_full
-                            };
+                        if len_hl > 0 {
+                            let hl_names_str =
+                                std::str::from_utf8(&buffer[..len_hl as usize]).unwrap_or("");
+                            let mut names: Vec<&str> = hl_names_str.split(';').collect();
 
-                            names.sort();
-                            if let Some(first) = names.first() {
-                                if *first != current_path_suffix {
-                                    // We are not the leader, skip
-                                    skipped_hardlinks += 1;
-                                    continue;
+                            let mut current_path_buffer = [0u8; 4096];
+                            let len_cur = Everything3_GetResultFullPathNameUTF8(
+                                results,
+                                i,
+                                current_path_buffer.as_mut_ptr(),
+                                current_path_buffer.len() as u64,
+                            );
+                            if len_cur > 0 {
+                                let current_path_full =
+                                    std::str::from_utf8(&current_path_buffer[..len_cur as usize])
+                                        .unwrap_or("");
+                                // Strip drive letter "X:" if present
+                                let current_path_suffix = if current_path_full.len() >= 2
+                                    && current_path_full.chars().nth(1) == Some(':')
+                                {
+                                    &current_path_full[2..]
+                                } else {
+                                    current_path_full
+                                };
+
+                                names.sort();
+                                if let Some(first) = names.first() {
+                                    if *first != current_path_suffix {
+                                        // We are not the leader, skip
+                                        skipped_hardlinks.fetch_add(1, Ordering::Relaxed);
+                                        return None;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                let len = Everything3_GetResultFullPathNameUTF8(
-                    results,
-                    i,
-                    buffer.as_mut_ptr(),
-                    buffer.len() as u64,
-                );
-
-                if len == 0 {
-                    // Fallback to getting PATH_AND_NAME property directly if helper fails
-                    let len2 = Everything3_GetResultPropertyTextUTF8(
+                    let len = Everything3_GetResultFullPathNameUTF8(
                         results,
                         i,
-                        EVERYTHING3_PROPERTY_ID_PATH_AND_NAME,
                         buffer.as_mut_ptr(),
                         buffer.len() as u64,
                     );
-                    if len2 > 0 {
-                        let path_str = std::str::from_utf8(&buffer[..len2 as usize]).unwrap_or("");
-                        let size = Everything3_GetResultSize(results, i);
-                        results_vec.push((PathBuf::from(path_str), size));
-                        added_files += 1;
+
+                    if len == 0 {
+                        // Fallback to getting PATH_AND_NAME property directly if helper fails
+                        let len2 = Everything3_GetResultPropertyTextUTF8(
+                            results,
+                            i,
+                            EVERYTHING3_PROPERTY_ID_PATH_AND_NAME,
+                            buffer.as_mut_ptr(),
+                            buffer.len() as u64,
+                        );
+                        if len2 > 0 {
+                            let path_str = std::str::from_utf8(&buffer[..len2 as usize]).unwrap_or("");
+                            let size = Everything3_GetResultSize(results, i);
+                            added_files.fetch_add(1, Ordering::Relaxed);
+                            Some((PathBuf::from(path_str), size))
+                        } else {
+                            zero_len_paths.fetch_add(1, Ordering::Relaxed);
+                            None
+                        }
                     } else {
-                        zero_len_paths += 1;
+                        let path_str = std::str::from_utf8(&buffer[..len as usize]).unwrap_or("");
+                        let size = Everything3_GetResultSize(results, i);
+                        added_files.fetch_add(1, Ordering::Relaxed);
+                        Some((PathBuf::from(path_str), size))
                     }
-                } else {
-                    let path_str = std::str::from_utf8(&buffer[..len as usize]).unwrap_or("");
-                    let size = Everything3_GetResultSize(results, i);
-                    results_vec.push((PathBuf::from(path_str), size));
-                    added_files += 1;
-                }
-            }
+                })
+                .flatten()
+                .collect();
 
             eprintln!(
                 "[Everything] Debug: Processed {} results - {} dirs skipped, {} zero-length paths, {} hardlinks skipped, {} files added",
-                count, skipped_dirs, zero_len_paths, skipped_hardlinks, added_files
+                count, 
+                skipped_dirs.load(Ordering::Relaxed), 
+                zero_len_paths.load(Ordering::Relaxed), 
+                skipped_hardlinks.load(Ordering::Relaxed), 
+                added_files.load(Ordering::Relaxed)
             );
 
             Everything3_DestroyResultList(results);
             Everything3_DestroySearchState(search_state);
+            
+            collected_results
         }
-        results_vec
     }
 }
 

@@ -73,36 +73,6 @@ fn calculate_hash(file: &mut fs::File) -> io::Result<u32> {
     Ok(digest.finalize())
 }
 
-fn reduce_by_content<'a>(
-    size: u64,
-    paths: &[&'a Path],
-    comparison: &Comparison,
-) -> Vec<Vec<&'a Path>> {
-    let mut map = HashMap::with_capacity(paths.len());
-
-    // Group files by crc32 of beginning
-    for path in paths {
-        let mut file = match fs::File::open(path) {
-            Ok(f) => f,
-            _ => continue,
-        };
-
-        let hash_result = match comparison {
-            Comparison::Fuzzy => calculate_fuzzy_hash(size, &mut file),
-            Comparison::Strict => calculate_hash(&mut file),
-        };
-
-        if let Ok(hash) = hash_result {
-            map.entry(hash).or_insert(Vec::new()).push(*path);
-        }
-    }
-
-    // Filter out single occurrences
-    map.retain(|_, v| v.len() > 1);
-
-    map.values().cloned().collect()
-}
-
 pub fn run(
     drive: &str,
     matcher: Option<&str>,
@@ -148,7 +118,41 @@ pub fn run(
     // Iterate through size groups simultaneously
     keys.par_iter().for_each(|size: &u64| {
         let same_size_paths = &map[size];
-        for same_crc_paths in reduce_by_content(*size, same_size_paths, &comparison).into_iter() {
+
+        // Parallelize the hashing of files within the same size group
+        let reduced_groups: Vec<Vec<&Path>> = if same_size_paths.len() > 1 {
+            let mut reduced_map: HashMap<u32, Vec<&Path>> = HashMap::new();
+
+            // Collect hashes in parallel
+            let hashes: Vec<Option<(u32, &Path)>> = same_size_paths
+                .par_iter()
+                .map(|path| {
+                    let mut file = match fs::File::open(path) {
+                        Ok(f) => f,
+                        _ => return None,
+                    };
+
+                    let hash_result = match comparison {
+                        Comparison::Fuzzy => calculate_fuzzy_hash(*size, &mut file),
+                        Comparison::Strict => calculate_hash(&mut file),
+                    };
+
+                    hash_result.ok().map(|hash| (hash, *path))
+                })
+                .collect();
+
+            // Group by hash locally (sequential aggregation is fast enough for reduced set)
+            for (hash, path) in hashes.into_iter().flatten() {
+                reduced_map.entry(hash).or_default().push(path);
+            }
+
+            reduced_map.retain(|_, v| v.len() > 1);
+            reduced_map.into_values().collect()
+        } else {
+            Vec::new()
+        };
+
+        for same_crc_paths in reduced_groups {
             let paths: Vec<String> = same_crc_paths
                 .into_iter()
                 .map(|p| p.to_string_lossy().to_string())

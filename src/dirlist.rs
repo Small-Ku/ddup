@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::io::Error;
 use std::path::{Path, PathBuf};
 
@@ -63,8 +64,8 @@ impl DirList {
                 let pattern =
                     matcher.map(|m| glob::Pattern::new(m).expect("Illegal matcher syntax"));
 
-                let entries = paths
-                    .into_iter()
+                let entries: Vec<_> = paths
+                    .par_iter()
                     .map(|p| Path::new(drive).join(p))
                     .filter(|full_path| {
                         pattern
