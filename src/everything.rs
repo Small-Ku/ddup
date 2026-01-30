@@ -50,6 +50,15 @@ impl EverythingSearch {
                 search_state,
                 EVERYTHING3_PROPERTY_ID_PATH_AND_NAME,
             );
+            // Request hardlink info for deduplication
+            Everything3_AddSearchPropertyRequest(
+                search_state,
+                EVERYTHING3_PROPERTY_ID_HARD_LINK_COUNT,
+            );
+            Everything3_AddSearchPropertyRequest(
+                search_state,
+                EVERYTHING3_PROPERTY_ID_HARD_LINK_FILE_NAMES,
+            );
 
             // Match path is important for drive-based searches
             Everything3_SetSearchMatchPath(search_state, 1);
@@ -92,6 +101,7 @@ impl EverythingSearch {
             let mut skipped_dirs = 0u64;
             let mut zero_len_paths = 0u64;
             let mut added_files = 0u64;
+            let mut skipped_hardlinks = 0u64;
 
             for i in 0..count {
                 // Skip directories (FILE_ATTRIBUTE_DIRECTORY = 0x10)
@@ -99,6 +109,58 @@ impl EverythingSearch {
                 if (attributes & 0x00000010) != 0 {
                     skipped_dirs += 1;
                     continue;
+                }
+
+                // Check hardlinks
+                let hl_count = Everything3_GetResultPropertyDWORD(
+                    results,
+                    i,
+                    EVERYTHING3_PROPERTY_ID_HARD_LINK_COUNT,
+                );
+                if hl_count > 1 {
+                    // Get all hardlink names
+                    let len_hl = Everything3_GetResultPropertyTextUTF8(
+                        results,
+                        i,
+                        EVERYTHING3_PROPERTY_ID_HARD_LINK_FILE_NAMES,
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u64,
+                    );
+                    if len_hl > 0 {
+                        let hl_names_str =
+                            std::str::from_utf8(&buffer[..len_hl as usize]).unwrap_or("");
+                        let mut names: Vec<&str> = hl_names_str.split(';').collect();
+
+                        let mut current_path_buffer = [0u8; 4096];
+                        let len_cur = Everything3_GetResultFullPathNameUTF8(
+                            results,
+                            i,
+                            current_path_buffer.as_mut_ptr(),
+                            current_path_buffer.len() as u64,
+                        );
+                        if len_cur > 0 {
+                            let current_path_full =
+                                std::str::from_utf8(&current_path_buffer[..len_cur as usize])
+                                    .unwrap_or("");
+                            // Strip drive letter "X:" if present
+                            let current_path_suffix = if current_path_full.len() >= 2
+                                && current_path_full.chars().nth(1) == Some(':')
+                            {
+                                &current_path_full[2..]
+                            } else {
+                                current_path_full
+                            };
+
+                            names.sort();
+                            if let Some(first) = names.first() {
+                                if *first != current_path_suffix {
+                                    // We are not the leader, skip
+                                    skipped_hardlinks += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let len = Everything3_GetResultFullPathNameUTF8(
@@ -134,8 +196,8 @@ impl EverythingSearch {
             }
 
             eprintln!(
-                "[Everything] Debug: Processed {} results - {} dirs skipped, {} zero-length paths, {} files added",
-                count, skipped_dirs, zero_len_paths, added_files
+                "[Everything] Debug: Processed {} results - {} dirs skipped, {} zero-length paths, {} hardlinks skipped, {} files added",
+                count, skipped_dirs, zero_len_paths, skipped_hardlinks, added_files
             );
 
             Everything3_DestroyResultList(results);
