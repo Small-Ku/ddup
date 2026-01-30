@@ -5,7 +5,7 @@
 `ddup` (**D**etect **Dup**licates) is an extremely fast tool that identifies potentially duplicated files in 
 [Windows NTFS Volumes](https://en.wikipedia.org/wiki/NTFS).
 
-Note that since the NTFS Journal is limited in size, not **all** duplicated files will be found.
+Note that since the NTFS Journal is limited in size, not **all** duplicated files will be found if the journal has wrapped around. Using `--everything` can mitigate this if you have Everything installed and indexed.
 
 ## Usage
  
@@ -16,21 +16,26 @@ ddup C:
 
 #### Scan C: recursively, search for duplicated .dmp files (case-insensitive) 
 ```
-ddup C: -m **\*.dmp -i
+ddup C: -m "**\*.dmp" -i
 ```
 Output:
 ```
-Scanning drive C: with matcher `**\*.dmp` (case-sensitive) [Fuzzy comparison]
+Scanning drive C: with matcher `**\*.dmp` (case-insensitive) [Fuzzy comparison, preference: USN]
 [1/3] Generating recursive dirlist
 Finished in 7.798245 seconds
 [2/3] Grouping by file size
 Finished in 0.0028928 seconds
 [3/3] Grouping by hash in thread pool
+Finished in 0.001117 seconds
 Potential duplicates [84654 bytes]
 	C:\Windows\LiveKernelReports\NDIS-20190504-0002.dmp
 	C:\ProgramData\Microsoft\Windows\Containers\Dumps\f9292c13-143c-4070-98b5-7e12e2afddfc.dmp
-Finished in 0.001117 seconds
 Overall finished in 7.857446 seconds
+```
+
+#### Scan using Everything backend (might find more files than USN scan)
+```
+ddup C: --everything
 ```
 
 ## Installation
@@ -42,15 +47,18 @@ cargo install ddup
 
 Install from repository:
 ```shell script
-cargo install --git https://github.com/netaneld122/ddup
+cargo install --git https://github.com/Small-Ku/ddup
 ```
 
 ## Implementation
 
 This tool is written in [Rust](https://www.rust-lang.org/) .
 
-`ddup` obtains a recursive dirlist by leveraging the [NTFS USN Journal](https://en.wikipedia.org/wiki/USN_Journal) mechanism 
-in order to read USN records for [MFT](https://en.wikipedia.org/wiki/NTFS#Master_File_Table) (**M**aster **F**ile **T**able) entries.  
+`ddup` can use either the [Everything](https://www.voidtools.com/) search engine or the [NTFS USN Journal](https://en.wikipedia.org/wiki/USN_Journal) to find files.
+
+If `--everything` is specified, `ddup` queries the Everything IPC to retrieve file lists directly.
+
+By default, it leverages the [NTFS USN Journal](https://en.wikipedia.org/wiki/USN_Journal) mechanism to read [MFT](https://en.wikipedia.org/wiki/NTFS#Master_File_Table) (**M**aster **F**ile **T**able) records, resolving full paths via an SQL-equivalent "recursive join" implemented in memory.
 
 Windows USN Records can be fetched via the following `IOCTL`s:
 * [`FSCTL_ENUM_USN_DATA`](https://docs.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_enum_usn_data)

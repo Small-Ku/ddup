@@ -45,11 +45,10 @@ fn parse_args() -> ArgMatches {
                 .action(ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("force-usn")
-                .long("force-usn")
-                .help(
-                    "Force manual USN journal traversal (disables Everything search and fallback)",
-                )
+            Arg::new("everything")
+                .short('E')
+                .long("everything")
+                .help("Use Everything search backend (instead of default USN journal)")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -86,10 +85,10 @@ fn main() {
     };
 
     // Determine the backend preference
-    let backend = if args.get_flag("force-usn") {
-        ddup::Backend::USN
-    } else {
+    let backend = if args.get_flag("everything") {
         ddup::Backend::Everything
+    } else {
+        ddup::Backend::USN
     };
 
     let result = if let Some(pattern) = args.get_one::<String>("match") {
