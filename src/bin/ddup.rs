@@ -41,6 +41,7 @@ fn parse_args() -> ArgMatches {
         )
         .arg(
             Arg::new("strict")
+                .short('s')
                 .long("strict")
                 .help("Do not perform fuzzy hashing, guarantees equivalence")
                 .action(ArgAction::SetTrue),
@@ -62,6 +63,7 @@ fn parse_args() -> ArgMatches {
         )
         .arg(
             Arg::new("link")
+                .short('l')
                 .long("link")
                 .help("Replace duplicates with hardlinks")
                 .action(ArgAction::SetTrue),
