@@ -22,7 +22,7 @@ fn parse_args() -> ArgMatches {
         .arg(
             Arg::new("drive")
                 .help("The drive letter to scan (example `C:`)")
-                .required(true)
+                .required_unless_present("wiztree")
                 .index(1),
         )
         .arg(
@@ -66,6 +66,14 @@ fn parse_args() -> ArgMatches {
                 .help("Replace duplicates with hardlinks")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("wiztree")
+                .short('w')
+                .long("wiztree")
+                .value_name("FILE")
+                .help("Use a WizTree CSV file as the source")
+                .num_args(1),
+        )
         .get_matches()
 }
 
@@ -78,10 +86,6 @@ fn main() {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
-
-    let drive = args
-        .get_one::<String>("drive")
-        .expect("Drive format is `<letter>:`");
 
     let instant = Instant::now();
 
@@ -96,17 +100,25 @@ fn main() {
     };
 
     // Determine the backend preference
-    let backend = if args.get_flag("everything") {
-        ddup::Backend::Everything
+    let (backend, source) = if let Some(wiztree_path) = args.get_one::<String>("wiztree") {
+        (ddup::Backend::WizTree, wiztree_path.as_str())
+    } else if args.get_flag("everything") {
+        (
+            ddup::Backend::Everything,
+            args.get_one::<String>("drive").unwrap().as_str(),
+        )
     } else {
-        ddup::Backend::USN
+        (
+            ddup::Backend::USN,
+            args.get_one::<String>("drive").unwrap().as_str(),
+        )
     };
 
     let result = if let Some(pattern) = args.get_one::<String>("match") {
         let is_sensitive = !args.get_flag("i");
         log::info!(
-            "Scanning drive {} with matcher `{}` ({}) [{:?} comparison, preference: {:?}]",
-            drive,
+            "Scanning {} with matcher `{}` ({}) [{:?} comparison, preference: {:?}]",
+            source,
             pattern,
             if is_sensitive {
                 "case-sensitive"
@@ -123,11 +135,11 @@ fn main() {
             require_literal_separator: false,
         };
 
-        algorithm::run(drive, Some(pattern), options, comparison, backend)
+        algorithm::run(source, Some(pattern), options, comparison, backend)
     } else {
         log::info!(
-            "Scanning drive {} [{:?} comparison, preference: {:?}]",
-            drive,
+            "Scanning {} [{:?} comparison, preference: {:?}]",
+            source,
             comparison,
             backend
         );
@@ -136,7 +148,7 @@ fn main() {
             require_literal_leading_dot: false,
             require_literal_separator: false,
         };
-        algorithm::run(drive, None, options, comparison, backend)
+        algorithm::run(source, None, options, comparison, backend)
     };
 
     let duplicates = match result {

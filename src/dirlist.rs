@@ -13,6 +13,7 @@ use super::Volume;
 pub enum Backend {
     Everything,
     USN,
+    WizTree,
 }
 
 pub struct DirList {
@@ -105,7 +106,97 @@ impl DirList {
 
                 Ok(DirList { entries })
             }
+            Backend::WizTree => {
+                // In case of WizTree, drive is actually the path to the CSV file
+                Self::from_wiztree_csv(drive, matcher, options)
+            }
         }
+    }
+
+    pub fn from_wiztree_csv(
+        csv_path: &str,
+        matcher: Option<&str>,
+        options: glob::MatchOptions,
+    ) -> Result<Self> {
+        let pattern = matcher.map(|m| glob::Pattern::new(m).context(crate::error::GlobSnafu));
+        let pattern = match pattern {
+            Some(Ok(p)) => Some(p),
+            Some(Err(e)) => return Err(e),
+            None => None,
+        };
+
+        let file = std::fs::File::open(csv_path).context(crate::error::VolumeOpenSnafu {
+            drive: csv_path.to_string(),
+        })?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut first_line = String::new();
+        use std::io::BufRead;
+        reader
+            .read_line(&mut first_line)
+            .map_err(|e| crate::error::AppError::LockPoison {
+                message: format!("Failed to read WizTree CSV header: {}", e),
+            })?;
+
+        // We use the remaining reader with simd-csv
+        let mut csv_reader = simd_csv::ZeroCopyReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .from_reader(reader);
+
+        let headers =
+            csv_reader
+                .byte_headers()
+                .map_err(|e| crate::error::AppError::LockPoison {
+                    message: format!("Failed to read CSV headers: {}", e),
+                })?;
+
+        let file_name_index = headers
+            .iter()
+            .position(|h| h == b"File Name")
+            .ok_or_else(|| crate::error::AppError::LockPoison {
+                message: "Missing 'File Name' column".to_string(),
+            })?;
+        let size_index = headers.iter().position(|h| h == b"Size").ok_or_else(|| {
+            crate::error::AppError::LockPoison {
+                message: "Missing 'Size' column".to_string(),
+            }
+        })?;
+
+        let mut entries = Vec::new();
+
+        while let Some(record) =
+            csv_reader
+                .read_byte_record()
+                .map_err(|e| crate::error::AppError::LockPoison {
+                    message: format!("CSV parsing error: {}", e),
+                })?
+        {
+            // WizTree CSV format:
+            // File Name,Size,Allocated,Modified,Attributes,Files,Folders,...
+            let path_bytes = record.unquote(file_name_index).unwrap_or_default();
+            let size_bytes = record.unquote(size_index).unwrap_or_default();
+
+            let path_str = String::from_utf8_lossy(path_bytes);
+            let size_str = String::from_utf8_lossy(size_bytes);
+
+            if let Ok(size) = size_str.trim().parse::<u64>() {
+                if size > 0 {
+                    let path = PathBuf::from(path_str.to_string());
+                    // Folders in WizTree CSV end with "\" and have size summary of children
+                    // We only want files for deduplication
+                    if !path_str.ends_with('\\') {
+                        if pattern
+                            .as_ref()
+                            .is_none_or(|pat| pat.matches_path_with(&path, options))
+                        {
+                            entries.push((path, size));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(DirList { entries })
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &(PathBuf, u64)> {
